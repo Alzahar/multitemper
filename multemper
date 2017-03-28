@@ -1,0 +1,960 @@
+#!/bin/bash
+SKoment="Измерение температуры"
+SNKoment="100 Ohm дополнить 10 50 500 1000 не доделаны сообщения УСТАНОВИТЕ ХХХ Ом и поканальность. Убираю pts(tty).
+Yokogawa_CA100 готова = stty;SF2\r\n;SD100\r\n;SO1\r\n.
+для g30p.txt..g34n.txt + погрешности
+ls: невозможно получить доступ к /dev/ttyU*: Нет такого файла или каталога
+/dev/ttyS тоже надо бы, но их 32:)"
+#самое ценное в dd;а=`dd if=/dev/ttyS0 status=none|sed -r -z 's/\x0d/\n/g'|tail -n 1|cut -c 2-`
+#с помощью dd читаем RS-232 с подключённым Evector | замена \r на \n | последняя строка = ответ  | со 2 символа
+SVer="1.5"
+SData="20160829"
+LogPath="/home/$USER/"
+#LogName="multemper_`date +%F_%T`"
+LogName="multemper10_log"
+LogEx=".txt"
+LogFile="$LogPath$LogName$LogEx"
+#время задержки меж операций ВВ
+SlpT="0.5"
+PogreshA=1 #Абсолютная Заданная Погрешность 1(2,3...);округляет; 1 = >+0,5 или <-0,5
+PogreshO=1 #Относительная Заданная Погрешность (1=+-0,5%,2=+-1,5%,...);округляет; 1 = >+0,5 или <-0,5 
+TShag=10 #Шаг в омах по умолчанию или из параметра -O
+OutConfTRxd=100
+cto="1"
+
+#Обработка входных опций
+if [ "$1" = "" ];then help="ok";else
+    while getopts "hHSldt:T:P:p:O:R:cnxmsgG:rvVEk:N:Z:" opt
+    do
+        case $opt in
+            T) TX="$OPTARG"
+                case $TX in
+                20|21|22|23|24|25|26|27|28|29|2a|2b|2c) TP="$TX";;
+                30|31|32|33|34|tt) TR="$TX";;
+                40|41|42) TI="$TX";;
+                4a|4b|4c) TU="$TX";;
+                50|51|52|53|54|55|56|57|58|59|5a|5b|5c|5d|5e|5f) TM="$TX";;
+                a) readConf="ok";WData="ok";RAdr="ok";;
+                *) echo "НЕИЗВЕСТНЫЙ ТИП ТЕРМО ДАТЧИКА! Выберите доступный тип из колонки TT"
+                Thelp="ok";; #Здесь оставлен блок для перенаправления в Thelp. Ниже есть ещё
+                esac
+            ;;
+            P) if [ $(($OPTARG)) -ge 0 ];then
+            PogreshA="$OPTARG"
+            fi
+            ;;
+            p) if [ $(($OPTARG)) -ge 0 ];then
+            PogreshO="$OPTARG"
+            fi
+            ;;
+            O) if [ $(($OPTARG)) -gt 0 ];then
+            TShag="$OPTARG"
+            fi
+            ;;
+            R) if [ $(($OPTARG)) -gt 0 ];then
+                case "$OPTARG" in 
+                #OutConfTRxd номинал терморезистора введённый вручную
+                10|50|100|500|1000) OutConfTRxd="$OPTARG" #При 0°C $OutConfTRxdΩ
+                ;;
+                *) echo "Используется нестандартный номинал TR $OPTARGΩ"
+                ;;
+                esac
+            fi
+            ;;
+            H) Thelp="ok";;
+            h) help="ok";;
+            S) Shelp="ok";;
+            l) LogR="Only";;
+            d) LogR="Date";;
+            k) TermCh="$OPTARG канал модуля температуры"
+            ch=0"$OPTARG";;
+            N) TermN="повторов будет $OPTARG"
+            Ntime="$OPTARG";;
+            Z) TermZ="пауза меж повторов будет $OPTARG секунд"
+            Ztime="$OPTARG";;
+            v) echo "Чтение версии."
+            readVer="ok";WData="ok";RAdr="ok";;
+            V) echo "Чтение версии *IDN?."
+            readSCPI="ok";WData="ok";RAdr="ok";;
+            t) echo "Программирование типа модуля - $OPTARG"
+            typeModul="$OPTARG";TAdr="ok";RData="ok";;
+            c) echo "Чтение конфигурации."
+            readConf="ok";WData="ok";RAdr="ok";;
+            r) echo "Сброс калибровки нуля."
+            reset="ok";RAdr="ok";;
+            s) echo "Калибровка нуля."
+            set="ok";RAdr="ok";;
+            g) echo "Чтение калибровки нуля градусов."
+            gset="ok";WData="ok";RAdr="ok";;
+            G) echo "Калибровка нуля градусов на $OPTARG"
+            Gset="ok";RAdr="ok"
+            ofsetStr="$OPTARG" #для АВТО формирования +XXXX (-Ga)
+            #костыль для формирования +XXXX
+            ofsetDec=$(($OPTARG))
+            ofsetHx=`echo "ibase=10; obase=16; $ofsetDec" | bc`
+            ofsetHL=`echo $ofsetHx|wc -m`
+            #echo "ofsetHx=$ofsetHx"
+            #echo "ofsetHL=$ofsetHL"
+            if [ $ofsetHL -eq 2 ];then 
+                    #ofsetHex=`printf '+%04d' "$ofsetHx"`   десятичные на входе :(
+                    if [ $ofsetDec -ge 0 ];then 
+                        ofsetHex="+000$ofsetHx"
+                    else
+                        ofsetHex="eror"
+                    fi
+            elif [ $ofsetHL -eq 3 ];then 
+                    if [ $ofsetDec -ge 0 ];then 
+                        ofsetHex="+00$ofsetHx"
+                    else
+                        ofsetHex="-000`echo $ofsetHx|cut -c 2-`" #тут был глючёк для -A..-F давало -0000
+                    fi
+            elif [ $ofsetHL -eq 4 ];then 
+                    if [ $ofsetDec -ge 0 ];then 
+                        ofsetHex="+0$ofsetHx"
+                    else
+                        ofsetHex="-00`echo $ofsetHx|cut -c 2-`"
+                    fi
+            elif [ $ofsetHL -eq 5 ];then 
+                    if [ $ofsetDec -ge 0 ];then 
+                        ofsetHex="+$ofsetHx"
+                    else
+                        ofsetHex="-0`echo $ofsetHx|cut -c 2-`"
+                    fi
+            elif [ $ofsetHL -eq 6 ];then 
+                    if [ $ofsetDec -ge 0 ];then 
+                        ofsetHex="eror"
+                    else
+                        ofsetHex="$ofsetHx"
+                    fi
+            else
+                    #ofsetHex=`printf '%05d' "$ofsetHx"`   десятичные на входе :(
+                    ofsetHex="eror"
+            fi
+            #echo "ofsetHex=$ofsetHex"
+            ;;
+            E) echo "Чтение ошибок канала."
+            readEr="ok";WData="ok";;
+            x) echo "Чтение аналогового входа в hex."
+            readHex="ok";WData="ok";;
+            n) echo "Чтение аналогового входа по напряжению."
+            readNpr="ok";WData="ok";;
+            m) echo "Чтение аналогового входа канала в метрике."
+            readMetr="ok";WData="ok";;
+            *) help="ok";;
+        esac
+    done
+fi
+
+#Коррекция адреса при необходимости
+#echo "ch=$ch"
+if [ "$TAdr"="ok" ];then
+    StrL="`echo $typeModul|wc -c`"
+    out01="`echo $typeModul|cut -c1`"
+    out1="\x`echo -n $out01|xxd -pu`"
+    if [ "$ch" = "" ];then 
+        if [ "$StrL" = "15" ];then
+                out1="\x25"
+                ch="`echo $typeModul|cut -c1,2`"
+#                outD="`echo $typeModul|cut -c3-`"
+#            elif [ "$StrL" = "16" ];then 
+            else
+                ch="`echo $typeModul|cut -c2,3`"
+#                outD="`echo $typeModul|cut -c4-`"
+#            else 
+#                ch=""
+        fi
+    fi
+    if [ "$out1" = "!" ] || [ "$out1" = "\x25" ];then outRez="ok";fi
+    
+fi
+#Проверка адреса
+if [ "$ch" = "01" ] || [ "$ch" = "02" ] || [ "$ch" = "03" ] || [ "$ch" = "04" ];then 
+    Ach="$ch"
+    elif [ "$ch" = "0a" ];then
+        Ach="01 02 03 04"
+        ch="01"
+    elif [ "$ch" = "0d" ] || [ "$ch" = "0b" ];then
+        Ach="01 02"
+        ch="01"
+    elif [ "$ch" = "0t" ];then
+        Ach="01 02 03"
+        ch="01"
+    else ch=""
+fi
+
+
+
+
+#Создание файла журнала
+if [ "$LogR" != "" ] ;then
+    if [ -f "$LogFile" ];then
+        echo "Обнаружен журнал температурных манипуляций $LogFile"
+    else
+        echo "Журнал температурных манипуляций `date +%F_%T`" >> $LogFile
+    fi
+#echo "Журнал температурных манипуляций в $LogFile"
+fi
+
+##########################
+
+
+
+if [ "$Shelp" = "ok" ];then
+    echo "sa1 для TC; TП
+on;on   - 3 ch referen
+off;off - 3 ch normal
+
+sa2 для TC; TП
+on;on   - k3 4 ch
+off;off - ok 4 ch
+
+sa3 для TC; TП
+1;2on   - для normal 2 TC; TП
+3;4on   - для normal 1 TC; TП
+5;6on   - для normal 3 TC; TП
+
+sa4 для TП
+1on - для normal 1 TП 
+2on - для normal 2 TП 
+3on - для normal 3 TП 
+4   - нету
+
+10 Ohm  - x3
+50;100;500;1k Ohm - nomal"
+exit 0
+fi
+
+
+if [ "$Thelp" = "ok" ];then
+    echo "TT	датчик	мин	макс	размер.	1канал	2канал	3канал	4канал	тип	аналог	α	Uпитания,В
+20	ТП	-270	1000	°C	y	y	y	n	E	ХА		
+21	ТП	-210	1200	°C	y	y	y	n	J	ХК		
+22	ТП	-270	1370	°C	y	y	y	n	K	ХА		
+23	ТП	-200	800	°C	y	y	y	n	L	ВР		
+24	ТП	-270	1300	°C	y	y	y	n	N	НН		
+25	ТП	0	2500	°C	y	y	y	n	A-1	ВР		
+26	ТП	0	1800	°C	y	y	y	n	A-2	ВР		
+27	ТП	0	1800	°C	y	y	y	n	A-3	ВР		
+28	ТП	-200	100	°C	y	y	y	n	M	МК		
+29	ТП	-50	1760	°C	y	y	y	n	R	ПП(13%)		
+2a	ТП	-270	400	°C	y	y	y	n	T	МК		
+2b	ТП	0	1820	°C	y	y	y	n	B	ПР(30%)		
+2c	ТП	-50	1760	°C	y	y	y	n	S	ПП(10%)		
+30	ТС	-50	200	°C	y	y	y	n	Медь(Cu)	0,00426	
+31	ТС	-180	200	°C	y	y	y	n	Медь_(М)	0,00428	
+32	ТС	-200	850	°C	y	y	y	n	Платина(Pt)	0,00385	
+33	ТС	-200	850	°C	y	y	y	n	Платина(П)	0,00391	
+34	ТС	-60	180	°C	y	y	y	n	Никель(Н)	0,00617	
+40	ток	0	1	мА	n	n	y	y	0,,1мА			
+41	ток	0	5	мА	n	n	y	y	0,,5мА			
+42	ток	0	20	мА	n	n	y	y	0,,20мА			
+4a	напряж.	0	50	мВ	y	y	y	n	0,,50мВ			
+4b	напряж.	0	1	В	y	y	y	n	0,,1В			
+4c	напряж.	0	10	В	y	y	y	n	0,,10В			
+50	тензом.	-1	1	мВ/В	y	y	y	n				1
+51	тензом.	-1	1	мВ/В	y	y	y	n				3
+52	тензом.	-1	1	мВ/В	y	y	y	n				5
+53	тензом.	-1	1	мВ/В	y	y	y	n				10
+54	тензом.	-5	5	мВ/В	y	y	y	n				1
+55	тензом.	-5	5	мВ/В	y	y	y	n				3
+56	тензом.	-5	5	мВ/В	y	y	y	n				5
+57	тензом.	-5	5	мВ/В	y	y	y	n				10
+58	тензом.	-10	10	мВ/В	y	y	y	n				1
+59	тензом.	-10	10	мВ/В	y	y	y	n				3
+5a	тензом.	-10	10	мВ/В	y	y	y	n				5
+5b	тензом.	-10	10	мВ/В	y	y	y	n				10
+5c	тензом.	-40	40	мВ/В	y	y	y	n				1
+5d	тензом.	-40	40	мВ/В	y	y	y	n				3
+5e	тензом.	-40	40	мВ/В	y	y	y	n				5
+5f	тензом.	-40	40	мВ/В	y	y	y	n				10"
+    exit 0
+fi
+
+
+
+
+
+if [ "$help" = "ok" ] || [ "$ch" = "" ];then
+    echo "Использование: $0 -t01043203e80400 
+    $0 -smk2 (s=Осуществить калибровку нуля. m=Чтение аналогового входа по напряжению. k2=Канал №2)
+    (номер канала последний в списке опций, либо следующие опции через пробел и с дефисом)
+    $0 -mk2 -s (Тоже самое, и в той же последовательности порядке, см. ниже)
+    
+Опции:
+    -k[№] № канала, корректные значения: 1-4. (при слитном списке опций удобнее писать номер канала последним)
+    БЕЗ КОРРЕКТНОГО НОМЕРА КАНАЛА КОМАНДЫ НЕ ВЫЛЕТАЮТ. (-k1, -k2, 3,4,a,b(d),t), если не задан, то в опции -t[тип] (AA=01,02,03,04)
+    
+    ПОСЛЕДОВАТЕЛЬНОСТЬ ВЫПОЛНЕНИЯ КОМАНД ВСЕГДА ПРОИЗВОДИТСЯ В НИЖЕ СЛЕДУЮЩЕМ ПОРЯДКЕ (логичном ИМХО) 
+    
+    -h Вывести данную подсказку по командам и выйти.
+    -H Вывести подсказку по типам TT модуля и выйти.    
+    -S Вывести подсказку по переключателям SA1-4 и выйти.    
+
+    -T32 Сравнение температуры с таблицей 0x32-го типа сопротивлений от 100Ω (пока только для 30..34h типа и только от 100Ω+).
+    -Ta Сравнение температуры с таблицаей для типа как в конфиге сопротивлений от 100Ω.
+    -P Заданная Абсолютная Погрешность 1°C(2,3...); для 1 диапазон (-0,5..+0,5)
+    -p Заданная Относительная Погрешность 1%(2,3...)
+    -O Шаг в Омах 1..10..100
+    -R Номинал ТR в Омах 10,50,100,500,1000
+
+    -l Запись в лог файл
+    -d Запись в лог файл с датой
+    -N Число повторов
+    -Z Пауза между повторами в секундах
+    
+    -v версия, чтение. Чтение версии. (\$AAF)
+    -V версия тип прибора SCPI, чтение. Чтение типа прибора по SCPI. (*IDN?)
+    -t[тип] установка. Программирование типа модуля (%AANNTTCCDDEEFF), где
+        AA - канал № (AA=01,02,03,04), NN - опорный канал №, TT (см. вывод опции -T), CCDD - номинал ТС, EE - 2,3,4х проводка ТС.
+        (10Ω=0064; 50Ω=01f4; 100Ω=03e8; 500Ω=1388; 1kΩ=2710)
+    -c конфигурация, чтение. Чтение конфигурации. (\$AA2)
+    -r reset, сброс 0. Сбросить калибровку нуля. (\$AA3)
+    -g Чтение смещения нуля градусов. (~AA9)
+    -G12 Ручное смещение нуля градусов с параметром в десятых долях градуса 1,23 округляем до -G12. (~AA+XXXX)
+    -Ga Автоматическое смещение нуля градусов с параметром в десятых долях градуса. (~AA+XXXX)
+    -E Чтение ошибок канала (\$AAE)
+    -s set, установка 0. Осуществить калибровку нуля. (\$AA1)
+
+    -x hex, чтение. Чтение аналогового входа в hex, raw коды АЦП с учётом калибровки нуля. (#AA9) ИЛИ
+    -n напряжение, чтение. Чтение аналогового входа по напряжению , raw коды АЦП с учётом калибровки нуля. (#AA9)
+    -m метрические значения, чтение. Чтение аналогового входа канала в метрике. (#AA)"
+    exit 0
+fi
+
+#echo "$SKoment версия $SVer от $SData"
+
+#Определение № консоли, проверка и включение лог файла
+KonL="`tty`"
+#KonS="`scpi_drv -r`"
+KonS="/dev/ttyS0 `ls /dev/ttyU* 2> /dev/null`"
+#KonP="$KonL `ls /dev/pts/?`"
+KonP="$KonL" #pts оставлен только свой
+KonA1="$KonP $KonS Выход"
+KonA2="$KonP $KonS Пропустить"
+echo "Нажмите 1 для вывода в текущую консоль или цифру варианта последовательного порта вывода:"
+select K in $KonA1; do
+    if [ $K = "Выход" ];then exit 1
+    else 
+        echo "Передача в канал $Ach через порт $K"
+        if [ "$LogR" != "" ] && [ -f "$LogFile" ] && [ -w "$LogFile" ] ;then
+            #KonN="|tee $K >> $LogFile"
+            #KonN="|tee $K >> $LogFile"
+            KonN1="$K"
+            KonN2="$LogFile"
+        else
+            KonN1="$K"
+            KonN2="/dev/null"
+        fi
+        break
+    fi
+done
+#YokUsb
+echo "Нажмите цифру варианта последовательного порта вывода Yokogawa_CA100:"
+select Yo in $KonA2; do
+    if [ $Yo = "Пропустить" ];then break
+    else 
+        echo "Yokogawa_CA100 на порту $Yo"
+        KonN3Yo="$Yo"
+        setPribor="1d00:5:cbd:8a3b:3:1c:7f:15:4:0:1:0:11:13:1a:0:12:f:17:16:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:0"
+        #Sprb96)
+        TestPortSpeed="9600"
+        TestPortSet4n="-parenb -parodd" 
+        TestPortSetX0="-ixon -ixoff -ixany"
+        TestPortSet10="-ignpar ixon ixoff ixany -parenb min 1 time 0"
+        TestPortOut="$TestPortSpeed $TestPortSet4n $TestPortSetX1 $TestPortSetSimv10"
+        #scpi_drv -sp $YokUsb
+        stty -F $KonN3Yo $TestPortOut
+        sleep 1
+        printf SF2"\r\n" > $KonN3Yo #Установка выхода Yokogawa_CA100 на резистор тип
+        sleep 1
+        printf SD"$OutConfTRxd\r\n" > $KonN3Yo #Установка выхода Yokogawa_CA100 на OutConfTRxd Ω
+        sleep 1
+        printf SO1"\r\n" > $KonN3Yo #Включение выхода Yokogawa_CA100
+        break
+    fi
+done
+
+#Выходная последовательность для консоли#Выходная последовательность для консоли#Выходная последовательность для консоли
+EndSim="\r\n"
+
+#echo "$KonN3Yo"
+#printf "`date +%F_%T`$EndSim"|tee "$KonN1" >> "$KonN2"
+#exit 0
+
+
+###########################################################################################
+#tut bylo 4tenie tablic iz files
+##############################################################
+
+#Запуск основного цикла
+if [ "$LogR" = "Date" ];then
+    printf "Запуск нового цикла `date +%F_%T`$EndSim" >> "$KonN2"
+    sleep "$SlpT"
+fi
+#   Общая Преднастройка
+
+#Вывод типа и версии прибора по SCPI
+if [ "$readSCPI" = "ok" ];then
+    printf "*IDN?$EndSim"|tee "$KonN1" >> "$KonN2"
+    sleep "$SlpT"
+fi
+
+
+
+#Вывод номера версии
+if [ "$readVer" = "ok" ];then
+    printf "\$$ch"F"$EndSim"|tee "$KonN1" >> "$KonN2"
+    sleep "$SlpT"
+fi
+#if [ "$LogN" != "" ] || [ "$LogD" != "" ];then
+#date +%F_%T > $LogFile
+#echo "Журнал температурных манипуляций" >> $LogFile
+#fi
+
+
+
+
+
+#       Цикл точки#       Цикл точки#       Цикл точки#       Цикл точки#       Цикл точки#       Цикл точки#       Цикл точки
+for ch in $Ach;do
+#           Настройка измерения точки, если надо
+    if [ "$LogR" = "Date" ];then
+        printf "Настройка канала №$ch `date +%F_%T`$EndSim" >> "$KonN2"
+        sleep "$SlpT"
+    fi
+
+#Программирование типа модуля
+    if [ "$typeModul" != "" ];then
+            #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+            #echo "StrL=$StrL"
+            #echo "out1=$out1"
+        if [ "$StrL" = "16" ];then
+                    #printf "`echo $typeModul|cut -c1`$ch`echo $typeModul|cut -c4-`\n"
+            printf "$out1$ch`echo $typeModul|cut -c4-`$EndSim"|tee "$KonN1" >> "$KonN2"
+                    #printf "$typeModul\n"
+        elif [ "$StrL" = "15" ];then
+            printf "\x25"|tee "$KonN1" >> "$KonN2"
+            printf "$ch`echo $typeModul|cut -c3-`$EndSim"|tee "$KonN1" >> "$KonN2"
+                    #printf "$typeModul\n"
+        elif [ "$StrL" = "13" ];then
+            printf "\x25$ch"|tee "$KonN1" >> "$KonN2"
+            printf "$typeModul\n"|tee "$KonN1" >> "$KonN2"
+        else
+            printf "$out1$ch`echo $typeModul|cut -c4-`$EndSim"|tee "$KonN1" >> "$KonN2"
+        fi
+        sleep "$SlpT"
+                
+    fi
+
+
+#Чтение конфигурации
+    if [ "$readConf" = "ok" ];then
+        OutConfL=20 #любое больше 15
+        while [ $(($OutConfL)) != 15 ];do
+            printf "\$$ch"2"$EndSim"|tee "$KonN1" >> "$KonN2"
+            OutConf0="`dd if=$KonN1 status=none|sed -r -z 's/\x0d/\n/g'|tail -n 1|cut -c 2-`"
+            OutConfL="`echo $OutConf0|wc -c`"
+            if [ $(($OutConfL)) -lt 15 ];then echo "Ошибка чтения конфигурации, повторный запрос.";sleep 1;fi
+        done
+        echo "Конфигурация $OutConf0"|tee "$KonL" >> "$KonN2"
+        OutConfCh="`echo $OutConf0|cut -c 2`"
+        OutConfRef="`echo $OutConf0|cut -c 4`"
+        OutConfTT="`echo $OutConf0|cut -c 5,6`"
+        OutConfTRxh="`echo $OutConf0|cut -c 7-10`"
+        OutConf234="`echo $OutConf0|cut -c 12`"
+        #перевод из 16 в 10 без деления на 10
+        OutConfTRxD="`echo "ibase=16; $OutConfTRxh"|bc`"
+        #Проверка на принудительную установку и различие
+        #НУЖНА Проверка на разные каналы с разными номиналами!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        case $ch in
+            01) OutConfTRxdt1="`echo "$OutConfTRxD/10"|bc`";OutConfTRxdtx="$OutConfTRxdt1";;
+            02) OutConfTRxdt2="`echo "$OutConfTRxD/10"|bc`";OutConfTRxdtx="$OutConfTRxdt2";;
+            03) OutConfTRxdt3="`echo "$OutConfTRxD/10"|bc`";OutConfTRxdtx="$OutConfTRxdt3";;
+            04) OutConfTRxdt4="`echo "$OutConfTRxD/10"|bc`";OutConfTRxdtx="$OutConfTRxdt4";;
+        esac
+        if [ -n "$OutConfTRxd" ] && [ "$OutConfTRxd" != "$OutConfTRxdtx" ];then
+            echo "в канале $ch ИСПОЛЬЗУЕТСЯ НОМИНАЛ $OutConfTRxdΩ В КОНФИГУРАЦИИ $OutConfTRxdtxΩ"
+        else 
+            OutConfTRxd="`echo "$OutConfTRxD/10"|bc`" #ТУТ ПО ПОСЛЕДНЕМУ СРАБОТАЕТ, А НАДО ИНДИВИДУАЛЬНО!!!!!!!!!!!!!
+        fi
+        #Расшифровка значений конфигурации и вывод
+        echo "измерительный канал №$OutConfCh"
+        echo "опорный канал №$OutConfRef"
+        echo "TT	датчик	мин	макс	размер.	1канал	2канал	3канал	4канал	тип	аналог	α	Uпитания,В"
+        echo "`$0 -H|sed -n -e /^$OutConfTT/p`"
+        if [ "$TX" = "a" ];then TX="$OutConfTT";fi
+        if [ -n "$OutConfTRxd" ] && [ "$OutConfTRxd" != 0 ];then echo "при 0°C $OutConfTRxdΩ";fi
+        
+        if [ -n "$KonN3Yo" ];then
+            printf SD"$OutConfTRxd\r\n" > $KonN3Yo #Установка выхода Yokogawa_CA100 на OutConfTRxd Ω
+        fi
+        
+        
+        if [ -n "$OutConf234" ] && [ "$OutConf234" != 0 ];then echo "схема включения $OutConf234-х проводная";fi
+        sleep "$SlpT"
+    fi
+
+
+    #чтение в массивы из файлов g30n.txt..g34p.txt (echo ${a30p[0]} для 100Ω)
+    if [ -n "$TX" ];then
+        TRn=0
+
+        #и тут продублировал блок, и наверху оставил для перекидывания в хелп по типам
+        case $TX in
+            20|21|22|23|24|25|26|27|28|29|2a|2b|2c) TP="$TX";;
+            30|31|32|33|34|tt) TR="$TX";;
+            40|41|42) TI="$TX";;
+            4a|4b|4c) TU="$TX";;
+            50|51|52|53|54|55|56|57|58|59|5a|5b|5c|5d|5e|5f) TM="$TX";;
+            #a) readConf="ok";WData="ok";RAdr="ok";;
+            *) echo "НЕИЗВЕСТНЫЙ ТИП ТЕРМО ДАТЧИКА! Выберите доступный тип из колонки TT";;
+        esac
+        
+        
+        if [ "$TR" = "tt" ];then
+            :
+            #ta32p=( `cat g32p.txt|cut -f1 -d " "` )
+            #TR=32
+            #massT="a`echo $TR`p"
+            #eval `echo $massT`="${ta32p[@]}"
+            #eval a`echo $TR`p="${ta32p[@]}"
+            #eval a`echo $TR`p=( `cat g32p.txt|cut -f1 -d " "` )
+            #eval a`echo $TR`n=( `cat g"$TR"n.txt|cut -f1 -d " "` )
+            #echo "massT=$massT"
+            #QQ="a"$TR"p.txt"
+            #echo "QQ=$QQ"
+            
+            #let a55n=11
+            #a{$!TM}n=11
+            #let a{$!TM}n=11
+            a32p=( `cat g32p.txt|cut -f1 -d " "` ) #echo ${a32p[1]};echo ${a32p[2]}
+            eval a`echo $TR`p=11
+            echo "TR=$TR"
+            echo "TM=$TM"
+            #echo "a32p[0;1]=$a32p[0]"
+            echo "a32p[0]=${a32p[0]}"
+            #echo "a32p[1]=${"$QQ"[1]}"
+            QQ=a32p
+            eeeee=( ${a32p[@]} )
+            echo "${a32p[@]}"
+            echo "eeeee=${eeeee[4]}"
+            eeeee=( a b c )
+            echo "eeeee=${eeeee[1]}"
+            echo "eeeee=${eeeee[2]}"
+            echo "eeeee=${eeeee[3]}"
+            echo "eeeee=${eeeee[4]}"
+            #cat g32p.txt|cut -f1 -d " "
+            exit 0
+        elif [ "$TR" != "" ];then
+            a30p=( `cat g30p.txt|cut -f1 -d " "` ) #echo ${a30p[1]};echo ${a30p[2]}
+            a30n=( `cat g30n.txt|cut -f1 -d " "` ) #echo ${a30n[1]};echo ${a30n[2]}
+            a31p=( `cat g31p.txt|cut -f1 -d " "` ) #echo ${a31p[1]};echo ${a31p[2]}
+            a31n=( `cat g31n.txt|cut -f1 -d " "` ) #echo ${a31n[1]};echo ${a31n[2]}
+            a32p=( `cat g32p.txt|cut -f1 -d " "` ) #echo ${a32p[1]};echo ${a32p[2]}
+            a32n=( `cat g32n.txt|cut -f1 -d " "` ) #;echo ${a32n[1]};echo ${a32n[2]}
+            a33p=( `cat g33p.txt|cut -f1 -d " "` ) #;echo ${a33p[1]};echo ${a33p[2]}
+            a33n=( `cat g33n.txt|cut -f1 -d " "` ) #;echo ${a33n[1]};echo ${a33n[2]}
+            a34p=( `cat g34p.txt|cut -f1 -d " "` ) #;echo ${a34p[1]};echo ${a34p[2]}
+            a34n=( `cat g34n.txt|cut -f1 -d " "` ) #;echo ${a34n[1]};echo ${a34n[2]}
+            case $TR in
+                30) aXp=( ${a30p[@]} );aXn=( ${a30n[@]} ) ;;
+                31) aXp=( ${a31p[@]} );aXn=( ${a31n[@]} ) ;;
+                32) aXp=( ${a32p[@]} );aXn=( ${a32n[@]} ) ;;
+                33) aXp=( ${a33p[@]} );aXn=( ${a33n[@]} ) ;;
+                34) aXp=( ${a34p[@]} );aXn=( ${a34n[@]} ) ;;
+            esac
+            
+        elif [ "$TP" != "" ];then
+            echo "ТАБЛИЦА ДЛЯ ТЕРМОПАР НЕ ЗАРЕГЕСТРИРОВАННА."
+            exit 0
+        elif [ "$TI" != "" ];then
+            echo "ТАБЛИЦА ДЛЯ ТОКОВОГО ТИПА НЕ ЗАРЕГЕСТРИРОВАННА."
+            exit 0
+        elif [ "$TU" != "" ];then
+            echo "ТАБЛИЦА ДЛЯ НАПРЯЖЕНИЯ НЕ ЗАРЕГЕСТРИРОВАННА."
+            exit 0
+        elif [ "$TM" != "" ];then
+            echo "ТАБЛИЦА ДЛЯ ТЕНЗОМОСТА НЕ ЗАРЕГЕСТРИРОВАННА."
+            exit 0
+        else
+            echo "ТАБЛИЦА ДЛЯ ДАННОГО ТИПА НЕ ЗАРЕГЕСТРИРОВАННА."
+            exit 0
+        fi
+
+    fi
+
+
+
+
+    #Сбросить калибровку нуля
+    if [ "$reset" = "ok" ];then
+        printf "\$$ch"3"$EndSim"|tee "$KonN1" >> "$KonN2"
+        sleep "$SlpT"
+    fi
+            
+    #Осуществить калибровку нуля
+    if [ "$set" = "ok" ];then
+        printf "\$$ch"1"$EndSim"|tee "$KonN1" >> "$KonN2"
+        sleep "$SlpT"
+    fi
+
+    #Считать значение смещения нуля градусов
+    if [ "$gset" = "ok" ];then
+        printf "~$ch"9"$EndSim"|tee "$KonN1" >> "$KonN2"
+        sleep "$SlpT"
+    fi
+
+#Осуществить смещение нуля градусов или АВТОсмещение
+    if [ "$Gset" = "ok" ];then
+        if [ "$ofsetStr" = "a" ];then #Смещение авто установки
+            printf "#$ch$EndSim"|tee "$KonN1" >> "$KonN2"
+            #Значение температуры
+            OutMetr0="`dd if=$KonN1 status=none|sed -r -z 's/\x0d/\n/g'|tail -n 1|cut -c 2-`"
+            OutMetrInv=`echo "scale=0;0 - $OutMetr0*100/10"|bc`
+            #echo "OutMetr0=$OutMetr0"
+            #echo "OutMetrInv=$OutMetrInv"
+            sleep "$SlpT"
+            printf "~$ch"9"$EndSim"|tee "$KonN1" >> "$KonN2"
+            #Смещение в данный момент
+            Outgset0="`dd if=$KonN1 status=none|sed -r -z 's/\x0d/\n/g'|tail -n 1|cut -c 2-`"
+            Outgset1=`echo "scale=0;$Outgset0*100/10"|bc`
+            #Вычисление Смещения авто установки (смещение + -температура)
+            OutSum=`echo "scale=0;$Outgset1 + $OutMetrInv"|bc`
+            sleep "$SlpT"
+            #echo "Outgset0=$Outgset0"
+            #echo "Outgset1=$Outgset1"
+            #echo "OutSum=$OutSum"
+                #такой же костыль для формирования +XXXX
+                ofsetHx=`echo "ibase=10; obase=16; $OutSum" | bc`
+                ofsetHL=`echo $ofsetHx|wc -m`
+                #echo "ofsetHx=$ofsetHx"
+                #echo "ofsetHL=$ofsetHL"
+                if [ $ofsetHL -eq 2 ];then 
+                        #ofsetHex=`printf '+%04d' "$ofsetHx"`   десятичные на входе :(
+                        if [ $OutSum -ge 0 ];then 
+                            ofsetHex="+000$ofsetHx"
+                        else
+                            ofsetHex="eror"
+                        fi
+                elif [ $ofsetHL -eq 3 ];then 
+                        if [ $OutSum -ge 0 ];then 
+                            ofsetHex="+00$ofsetHx"
+                        else
+                            ofsetHex="-000`echo $ofsetHx|cut -c 2-`"
+                        fi
+                elif [ $ofsetHL -eq 4 ];then 
+                        if [ $OutSum -ge 0 ];then 
+                            ofsetHex="+0$ofsetHx"
+                        else
+                            ofsetHex="-00`echo $ofsetHx|cut -c 2-`"
+                        fi
+                elif [ $ofsetHL -eq 5 ];then 
+                        if [ $OutSum -ge 0 ];then 
+                            ofsetHex="+$ofsetHx"
+                        else
+                            ofsetHex="-0`echo $ofsetHx|cut -c 2-`"
+                        fi
+                elif [ $ofsetHL -eq 6 ];then 
+                        if [ $OutSum -ge 0 ];then 
+                            ofsetHex="eror"
+                        else
+                            ofsetHex="$ofsetHx"
+                        fi
+                else
+                        #ofsetHex=`printf '%05d' "$ofsetHx"`   десятичные на входе :(
+                        ofsetHex="eror"
+                fi
+            #Смещение авто установки
+            #echo "ofsetHex=$ofsetHex"
+
+        fi
+            printf "~$ch$ofsetHex$EndSim"|tee "$KonN1" >> "$KonN2"
+        sleep "$SlpT"
+        #Считать значение смещения нуля градусов после корректировки
+        if [ "$gset" = "ok" ];then
+        printf "~$ch"9"$EndSim"|tee "$KonN1" >> "$KonN2"
+        sleep "$SlpT"
+        fi
+    fi
+
+#Ошибки по каналу
+    if [ "$readEr" = "ok" ];then
+        printf "\$$ch"E"$EndSim"|tee "$KonN1" >> "$KonN2"
+        sleep "$SlpT"
+    fi
+
+
+done
+
+
+#           Конец цикла Настройки измерения точек по канально
+##################################################################################################################
+
+
+#           Цикл ИзмерениЯ точки запрос (все разы)
+for Nizm in `seq 1 $Ntime`;do
+
+
+#           Цикл Измерение точки запрос (один проход по каналам)
+for ch in $Ach;do
+
+if [ "$LogR" = "Date" ];then
+    printf "Опрос канала №$ch `date +%F_%T`$EndSim" >> "$KonN2"
+    sleep "$SlpT"
+fi
+if [ "$ch" = "01" ];then
+    printf "канал №$ch \t"
+    elif [ "$ch" = "02" ];then
+    printf "канал №$ch \t\t"
+    elif [ "$ch" = "03" ];then
+    printf "канал №$ch \t\t\t"
+    elif [ "$ch" = "04" ];then
+    printf "канал №$ch \t\t\t\t"
+fi
+
+
+        #Чтение аналоговых входов в hex (1-4 каналы),raw коды АЦП с учётом калибровки нуля
+if [ "$readHex" = "ok" ];then
+    printf "#$ch"9"$EndSim"|tee "$KonN1" >> "$KonN2"
+    sleep "$SlpT"
+fi
+
+        #Чтение аналоговых входов в hex (1-4 каналы),raw коды АЦП с учётом калибровки нуля
+if [ "$readNpr" = "ok" ];then
+    printf "#$ch"9"$EndSim"|tee "$KonN1" >> "$KonN2"
+    sleep "$SlpT"
+fi
+
+
+
+        #Чтение аналогового входа канала в метрике (AA=01,02,03,04)
+if [ "$readMetr" = "ok" ];then
+    if [ -n "$TX" ];then
+            :
+            delta100=99800 #Измеренная Погрешность при старте
+            #PogreshA=1 #Заданная Погрешность 1(2,3...);округляет; 1 = >+0,5 или <-0,5  
+            #TShag=10 #Шаг в омах
+            #Для прохода по значениям меньше 100Ω 
+            #cto="n"
+            #Для прохода по значениям больше 100Ω 
+            #cto="p"
+            #При 0°C $OutConfTRxdΩ
+            #RezistrM - это не правильное значение, а приведённое к 100Ω, для вытаскивания температуры из таблицы
+            if [ "$cto" = "-1" ];then #501005001000?#501005001000?#501005001000?#501005001000??????????????????????????????
+                TRz=$((0-$TRn))
+                #замена (100+$TRz);(100+$TRn);RezistrM;и оставить возможность для (TRn+$TShag)
+                RezistrR="`echo "scale=0;($OutConfTRxd-$TRn*$OutConfTRxd/100)/1"|bc`"
+                RezistrM="`echo "scale=0;($OutConfTRxd-$TRn*$OutConfTRxd/100)/1"|bc`"
+                else
+                TRz=$(($TRn))
+                RezistrM="`echo "scale=0;($OutConfTRxd+$TRn*$OutConfTRxd/100)/1"|bc`"
+            fi
+            PogreshA100="`echo "scale=0;($PogreshA*100)/1"|bc`" #абсолютная * 100
+            #Считаю абсолютную погрешность из заданной относительной 
+            PogreshAO100="`echo "scale=0;($PogreshO*$RezistrM)/1"|bc`" #абсолютная из заданной относительной * 100
+            #и если абсолютная из заданной относительной >= заданной абсолютно, то по посчитанной и сравниваю
+            if [ $(($PogreshAO100)) -ge $(($PogreshA100)) ];then #100100100100100100100100100100
+                    PogreshS100=$(($PogreshAO100)) #100100100100100100100100100100 #100100100100100100100100100100
+                else PogreshS100=$PogreshA100
+            fi
+            #echo "PogreshA=$PogreshA"
+            #echo "PogreshO=$PogreshO" 
+            #echo "PogreshS=$PogreshS"
+            # пока измеренная округлённая погрешность > +установленной  < -установленной
+            #while [ $(($delta1)) -gt $PogreshS ] || [ $(($delta1)) -lt -$PogreshS ];do
+            # пока измеренная округлённая погрешность >= +установленной  <= -установленной
+            while [ $(($delta100)) -ge $PogreshS100 ] || [ $(($delta100)) -le -$PogreshS100 ];do #delta1!!!!!!!!delta1!!!!!!!!!!delta1!!!!!
+                #echo "deltaT=$deltaT delta1=$delta1 delta100=$delta100 PogreshS100=$PogreshS100"
+
+                printf "#$ch$EndSim"|tee "$KonN1" >> "$KonN2"
+                #OutT=`dd if="$KonN1"`
+                #OutT=`dd if=$KonN1 status=noxfer|tail -n 1`
+                
+                #тут очень интересный ПЕРВЫЙ символ, перезаписывает с начала строки, потому cut -с 3-, а не со 2-
+                #0D заменить бы на 0A
+                #OutMetr="`dd if=$KonN1 status=none|sed "s/#$ch//"|cut -c 3-`"
+                #OutMetr="`dd if=$KonN1 status=none|sed "s/#$ch//"|cut -c 3-|sed -r -z 's/\x0d/\n/g'`"
+                #OutMetr0="`dd if=$KonN1 status=none|sed -r -z 's/\x0d/\n/g'|tail -n 1|cut -c 2-|tr "." ","`"
+                OutMetr0="`dd if=$KonN1 status=none|sed -r -z 's/\x0d/\n/g'|tail -n 1|cut -c 2-`"
+                #OutMetrNorm[$ch]=`echo "$OutMetr0"|bc`
+                #echo "${OutMetr[$ch]}R" > t/t2.txt
+                
+                #проверка каналов на ошибку
+                case $OutMetr0 in 
+                    S) OutMetr0="КЗ";deltaT="99999";delta1="99999" #delta1!!!!!!!!delta1!!!!!!!!!!delta1!!!!!
+                    ;;
+                    B) OutMetr0="Обрыв";deltaT="99999";delta1="99999" #delta1!!!!!!!!delta1!!!!!!!!!!delta1!!!!!
+                    ;;
+                    *) :
+                #чтение из массива для сравнения g30n.txt..g34p.txt echo ${a30p[1]}
+                        if [ "$cto" = "-1" ];then
+                                deltaB=`echo ${aXn[$TRn]}|tr "," "."` 
+                                RezistrM=$((100-$TRn)) #100100100100100100100100100100 #100100100100100100100100100100
+                            else
+                                #TX=32
+                                #ZZZZ=32p
+                                #deltaB=`echo ${a32p[$TRn]}|tr "," "."` 
+                                deltaB=`echo ${aXp[$TRn]}|tr "," "."` 
+                                RezistrM=$((100+$TRn)) #100100100100100100100100100100 #100100100100100100100100100100
+                                #echo $deltaB
+                                #exit 0
+                        fi
+                        deltaT="`echo "scale=2;$OutMetr0 - $deltaB"|bc`"
+                        #deltaT="`echo "scale=2;$OutMetr0 - ${a32p[$TRn]}"|bc`"
+                        if [ `echo $deltaT|grep "-"` ];then 
+                                delta1="`echo "scale=0;($deltaT-0.5)/1"|bc`" #округляет  #delta1!!!!!!!!delta1!!!!!!!!!!delta1!!!!!
+                            else
+                                delta1="`echo "scale=0;($deltaT+0.5)/1"|bc`" #округляет #delta1!!!!!!!!delta1!!!!!!!!!!delta1!!!!!
+                        fi
+                        delta100="`echo "scale=0;($delta1*100)/1"|bc`"
+                    ;;
+                esac
+                #sleep "$SlpT"
+                echo "измерено=$OutMetr0 в таблице=$deltaB погрешность=$deltaT подключено $RezistrM Ω"|tee "$KonL" >> "$KonN2"
+                        #if [ "$deltaT" = "" ];then delta1=100;fi
+                        #echo "deltaB=$deltaB"
+                        #echo "deltaT=$deltaT"
+                        #echo "delta1=$delta1"
+                sleep "$SlpT"
+            done
+            #echo $OutMetr0
+            #echo "погрешность=$(($OutMetr0-${a32p[$TRn]}))"
+            echo "погрешность при $(($TRn*$cto+100))Ω $deltaT"|tee "$KonL" >> "$KonN2" #1001001001001001001001001001001***ДОМНОЖИТЬ!!
+            sleep "$SlpT"
+            TRn=$(($TRn+$TShag)) #1001001001001001001001001001001 #1001001001001001001001001001001+++++++++++++++++++++++++
+#            if [ -z ${a32p[$TRn]} ];then 
+                #когда закончится таблица
+                 #   :
+                 #   echo "Последнее значение."
+                 #   TRn=0
+                 #   if [ "$cto" = "p" ];then 
+                 #           cto="n"
+                 #           sleep 10
+                 #       else
+                #            exit 0
+                #    fi
+                #else 
+                    if [ "$cto" = "-1" ];then
+                        if [ -z ${aXn[$TRn]} ];then 
+                #когда закончится таблица
+                            #echo "aXn[$TRn]=${aXn[$TRn]}."
+                            echo "Последнее отрицательное значение."
+                            if [ -n "$KonN3Yo" ];then
+                                printf SD100"\r\n" > $KonN3Yo
+                                echo 100
+                            fi
+                            TRn=0
+                            cto="1"
+                            exit 0
+                            
+                            
+                        else
+                            #echo "aXn[$TRn]=${aXn[$TRn]}."
+                            echo "установите $((100-$TRn))Ω" #100100100100100100100100100100100100100100100100100100100+1+1+1+1
+                            if [ -n "$KonN3Yo" ];then
+                                printf SD"$((100-$TRn))\r\n" > $KonN3Yo
+                                echo $((100-$TRn))
+                            fi
+                        fi
+                    else
+                #когда закончится таблица
+                        if [ -z ${aXp[$TRn]} ];then 
+                            echo "Последнее положительное значение."
+                            TRn=0
+                            cto="-1"
+                            echo "Установите 100Ω для уменьшения значений сопротивления." #00000000000000000000000000000000000000000000
+                            if [ -n "$KonN3Yo" ];then
+                                printf SD100"\r\n" > $KonN3Yo
+                                echo 100
+                            fi
+                            sleep 10
+                            
+                        else
+                            echo "установите $((100+$TRn))Ω" #100100100100100100100100100100100100100100100100100100100+1+1+1+1
+                            if [ -n "$KonN3Yo" ];then
+                                printf SD"$((100+$TRn))\r\n" > $KonN3Yo
+                                echo $((100+$TRn))
+                            fi
+                        fi
+                    fi
+#            fi
+            :
+            #echo "установите $(($TRn+100))Ω"
+        else
+            #вывод в ВЫБРАННЫЙ tty и в LOG FILE
+            printf "#$ch$EndSim"|tee "$KonN1" >> "$KonN2"
+            OutMetr0="`dd if=$KonN1 status=none|sed -r -z 's/\x0d/\n/g'|tail -n 1|cut -c 2-`"
+            
+            #проверка каналов на ошибку
+            case $OutMetr0 in 
+                S) echo "КЗ" |tee "$KonL" >> "$KonN2"
+                ;;
+                B) echo "Обрыв"|tee "$KonL" >> "$KonN2"
+                ;;
+                *) :
+            #вывод в LOCAL tty и в LOG FILE
+                echo $OutMetr0 |tee "$KonL" >> "$KonN2"
+            esac
+            
+    fi
+    
+    
+    #echo $OutMetr0
+    #echo "${OutMetrNorm[$ch]}"
+    #echo "температура для $ch = $OutMetr градусов"
+    #echo -n "температура M для $ch = ${OutMetr[$ch]}"
+    #echo "градусов"
+    #exit 0
+    sleep "$SlpT"
+fi
+
+#           Измерение точки проверка ответа
+
+
+##########################
+
+#echo "inD=$inD"
+
+######################3
+
+#           проверка данных измерения цикла опроса
+
+
+#           запись данных измерения цикла опроса
+
+done
+#       Конец Цикла точки
+
+if [ "$Nizm" != "$Ntime" ] && [ "$Ntime" != "" ] && [ $(($Ztime)) -gt 0 ];then 
+    echo "После цикла №$Nizm из $Ntime ожидание $Ztime секунд"
+    sleep $Ztime
+    sleep "$SlpT"
+fi
+
+done
+#       Конец циклов ИзмерениИЙ точки (все разы)
+
+
+
+#    Запрос команды
+
+
+
+#Конец основного цикла
+
+
+
+##########################
+#Перевод из символов в hex
+# STR="hello"
+
+# HEXVAL=$(xxd -pu <<< "$STR")
+# echo "$HEXVAL"
+#6C6C6568A6F
+
+#Or:
+
+# HEXVAL=$(hexdump -e '"%X"' <<< "$STR")
+# echo "$HEXVAL"
+#6C6C6568A6F
+##########################
