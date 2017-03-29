@@ -1,14 +1,15 @@
 #!/bin/bash
-SKoment="Измерение температуры"
-SNKoment="100 Ohm дополнить 10 50 500 1000 не доделаны сообщения УСТАНОВИТЕ ХХХ Ом и поканальность. Убираю pts(tty).
+SKoment="Переход на git"
+SNKoment="Измерение температуры
+100 Ohm дополнить 10 50 500 1000 не доделаны сообщения УСТАНОВИТЕ ХХХ Ом и поканальность. Убираю pts(tty).
 Yokogawa_CA100 готова = stty;SF2\r\n;SD100\r\n;SO1\r\n.
 для g30p.txt..g34n.txt + погрешности
 ls: невозможно получить доступ к /dev/ttyU*: Нет такого файла или каталога
 /dev/ttyS тоже надо бы, но их 32:)"
 #самое ценное в dd;а=`dd if=/dev/ttyS0 status=none|sed -r -z 's/\x0d/\n/g'|tail -n 1|cut -c 2-`
 #с помощью dd читаем RS-232 с подключённым Evector | замена \r на \n | последняя строка = ответ  | со 2 символа
-SVer="1.5"
-SData="20160829"
+SVer="1.7"
+SData="20170328"
 LogPath="/home/$USER/"
 #LogName="multemper_`date +%F_%T`"
 LogName="multemper10_log"
