@@ -151,6 +151,8 @@ if [ "$TAdr"="ok" ];then
     StrL="`echo $typeModul|wc -c`"
     out01="`echo $typeModul|cut -c1`"
     out1="\x`echo -n $out01|xxd -pu`"
+    #перевод из hex в ASCII, (hex в ВЕРХНЕМ регистре)-u, (непрерывный вывод postscript)-p
+    #xxd -r перевод из ASCII в hex, echo -n 0x3132330d0a|xxd -r = 123
     if [ "$ch" = "" ];then 
         if [ "$StrL" = "15" ];then
                 out1="\x25"
